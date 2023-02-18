@@ -5,45 +5,27 @@ from typing import List, Optional
 
 import lightning as L
 import requests
-from lightning.app.frontend import StaticWebFrontend
+from lightning.app.frontend import StreamlitFrontend
 from lightning.app.storage import Drive
 from lightning.app.utilities.frontend import AppInfo
-from lightning_api_access import APIAccessFrontend
 
 from muse import (
     LoadBalancer,
     Locust,
-    MuseSlackCommandBot,
     SafetyCheckerEmbedding,
     StableDiffusionServe,
 )
 from muse.CONST import ENABLE_ANALYTICS, MUSE_GPU_TYPE, MUSE_MIN_WORKERS
 from muse.utility.analytics import analytics_headers
+from muse.ui.streamlit_ui import my_streamlit_ui
 
 
-class ReactUI(L.LightningFlow):
-    def configure_layout(self):
-        return StaticWebFrontend(os.path.join(os.path.dirname(__file__), "muse", "ui", "build"))
-
-
-class APIUsageFlow(L.LightningFlow):
+class StreamlitUI(L.LightningFlow):
     def __init__(self, api_url: str = ""):
         super().__init__()
         self.api_url = api_url
-
     def configure_layout(self):
-        return APIAccessFrontend(
-            apis=[
-                {
-                    "name": "Generate Image",
-                    "url": f"{self.api_url}/api/predict",
-                    "method": "POST",
-                    "request": {"prompt": "cats in hats", "high_quality": "true"},
-                    "response": {"image": "data:image/png;base64,<image-actual-content>"},
-                }
-            ]
-        )
-
+        return StreamlitFrontend(render_fn=my_streamlit_ui)
 
 class MuseFlow(L.LightningFlow):
     """The MuseFlow is a LightningFlow component that handles all the servers and uses load balancer to spawn up and
@@ -107,14 +89,11 @@ class MuseFlow(L.LightningFlow):
             )
             self.add_work(work)
 
-        self.slack_bot = MuseSlackCommandBot(command="/muse")
         if self.load_testing:
             self.locust = Locust(locustfile="./scripts/locustfile.py")
         self.printed_url = False
-        self.slack_bot_url = ""
         self.dream_url = ""
-        self.ui = ReactUI()
-        self.api_component = APIUsageFlow()
+        self.ui = StreamlitUI()
 
         self.safety_embeddings_ready = False
 
@@ -158,8 +137,6 @@ class MuseFlow(L.LightningFlow):
         # provision these works early
         if not self.load_balancer.is_running:
             self.load_balancer.run([])
-        if not self.slack_bot.is_running:
-            self.slack_bot.run("")
 
         if not self.safety_embeddings_ready:
             self.safety_checker_embedding_work.run()
@@ -177,16 +154,12 @@ class MuseFlow(L.LightningFlow):
             self.load_balancer_started = True
 
         if self.load_balancer.url:  # hack for getting the work url
-            self.api_component.api_url = self.load_balancer.url
+            self.ui.run()
+            self.ui.api_url = self.load_balancer.url
             self.dream_url = self.load_balancer.url
-            if self.slack_bot is not None:
-                self.slack_bot.run(self.load_balancer.url)
-                self.slack_bot_url = self.slack_bot.url
-                if self.slack_bot.url and not self.printed_url:
-                    print("Slack Bot Work ready with URL=", self.slack_bot.url)
-                    print("model serve url=", self.load_balancer.url)
-                    print("API component url=", self.api_component.state_vars["vars"]["_layout"]["target"])
-                    self.printed_url = True
+            if not self.printed_url:
+                print("model serve url=", self.load_balancer.url)
+                self.printed_url = True
 
         if self.load_testing and self.load_balancer.url:
             self.locust.run(self.load_balancer.url)
